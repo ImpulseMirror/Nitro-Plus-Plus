@@ -61,11 +61,14 @@ def load_model(repo_or_path, load_4bit=False, load_8bit=False):
 
     cfg = AutoConfig.from_pretrained(repo_or_path, trust_remote_code=True)
     tok = AutoTokenizer.from_pretrained(repo_or_path, use_fast=True, trust_remote_code=True)
-
     if tok.pad_token_id is None and tok.eos_token_id is not None:
         tok.pad_token_id = tok.eos_token_id
 
-    tok = AutoTokenizer.from_pretrained(repo_or_path, use_fast=True, trust_remote_code=True)
+    # cap absurd model_max_length...
+    max_ctx = getattr(tok, "model_max_length", None)
+    if not isinstance(max_ctx, int) or max_ctx > 100_000:
+        tok.model_max_length = 8192
+
 
     # cap absurd model_max_length values to avoid Rust tokenizer overflow on Windows
     max_ctx = getattr(tok, "model_max_length", None)
@@ -151,45 +154,130 @@ def translate(repo_or_path, text, max_new=256, temp=0.0, load_4bit=False, load_8
 
 
 def build_inputs(tok, jp_text: str):
-    sys = ("You are a professional JP→EN visual-novel translator. "
-           "Output ONLY valid JSON with keys exactly: "
-           '{"source","translation","notes"}. '
-           "No extra text, no code fences.")
+    sys = (
+        "You are a professional JP→EN visual-novel/news translator. "
+        'Output ONLY valid JSON with keys exactly: {"source","translation","notes"}. '
+        "Rules for proper nouns (people, places, organizations, regions, stations, universities): "
+        "use the standard English name if it exists; otherwise use Hepburn-style romaji. "
+        "Do NOT translate morphemes literally. "
+        "Examples: 東海 → Toukai (region), 東海地方 → Toukai region, 東海大学 → Tokai University. "
+        "If ambiguous, prefer romaji rather than literal meanings like 'East Sea'. "
+        "Keep the translation concise; put brief explanations in 'notes' only."
+    )
 
-    # one-shot example to anchor format & brevity
-    example_user = "課長は根回しもしないで方針を変えたから、現場では「空気を読めない」って不満が爆発してる。"
-    example_assistant = "{\"source\":\"課長は根回しもしないで方針を変えたから、現場では「空気を読めない」って不満が爆発してる。\",\"translation\":\"The manager changed the policy without any nemawashi, so the team on the ground is fuming that he can't read the room.\",\"notes\":\"「根回し」(nemawashi) = informal, behind-the-scenes consensus-building common in Japanese workplaces; 「空気を読めない」 = 'can't read the room', i.e., insensitive to shared, unspoken context.\"}"
+    # Few-shot: anchor 東海 usage in a weather context
+    ex_src = "東海では局地的に非常に激しい雨が降っています。"
+    ex_out = {
+        "source": ex_src,
+        "translation": "In the Toukai region, localized torrential rain is falling.",
+        "notes": "「東海」 here refers to Japan’s Toukai region (Aichi, Shizuoka, Mie, Gifu), not 'East Sea'."
+    }
+    ex_json = json.dumps(ex_out, ensure_ascii=False)
 
     messages = [
         {"role": "system", "content": sys},
-        {"role": "user", "content": example_user},
-        {"role": "assistant", "content": example_assistant},
+        {"role": "user", "content": ex_src},
+        {"role": "assistant", "content": ex_json},
         {"role": "user", "content": jp_text.strip()},
     ]
 
     ctx = _safe_ctx_len(tok)
-    
     if hasattr(tok, "apply_chat_template") and getattr(tok, "chat_template", None):
         text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         return tok(text, return_tensors="pt", truncation=True, max_length=ctx)
     else:
-        prompt = (f"<system>{sys}</system>\n"
-                f"<user>{example_user}</user>\n"
-                f"<assistant>{example_assistant}</assistant>\n"
-                f"<user>{jp_text.strip()}</user>\n<assistant>")
+        prompt = (
+            f"<system>{sys}</system>\n"
+            f"<user>{ex_src}</user>\n"
+            f"<assistant>{ex_json}</assistant>\n"
+            f"<user>{jp_text.strip()}</user>\n<assistant>"
+        )
         return tok(prompt, return_tensors="pt", truncation=True, max_length=ctx)
+
+
+def translate_with_loaded(tok, model, kind, text, max_new=256, temp=0.0):
+    inputs = build_inputs(tok, text)
+    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+    prompt_len = inputs["input_ids"].shape[1]
+    stopper = StoppingCriteriaList([BalancedJsonStopper(tok, prompt_len)])
+    pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+    eos_ids = [tok.eos_token_id] if tok.eos_token_id is not None else None
+
+    out = model.generate(
+        **inputs,
+        max_new_tokens=min(max_new, 96),
+        do_sample=False,
+        temperature=None,
+        repetition_penalty=1.0,
+        eos_token_id=eos_ids,
+        pad_token_id=pad_id,
+        stopping_criteria=stopper,
+    )
+    new_tokens = out[0][prompt_len:]
+    decoded = tok.decode(new_tokens, skip_special_tokens=True)
+    return extract_json_balanced(decoded, {"source": text, "translation": decoded.strip(), "notes": ""})
+
+
+def serve(args):
+    from fastapi import FastAPI
+    from pydantic import BaseModel
+    import uvicorn
+
+    # Load once; stays in memory while the server runs
+    repo = args.model
+    local = repo if Path(repo).exists() else get_local_model(repo)
+    tok, model, kind = load_model(local, args.load_4bit, args.load_8bit)
+
+    app = FastAPI()
+
+    class Req(BaseModel):
+        text: str
+        max_new: int = 256
+        temp: float = 0.0
+
+    @app.get("/health")
+    def health():
+        return {"status": "ok"}
+
+    @app.post("/translate")
+    def translate_endpoint(r: Req):
+        # Return a dict (FastAPI will serialize)
+        return json.loads(translate_with_loaded(tok, model, kind, r.text, r.max_new, r.temp))
+
+    uvicorn.run(app, host=args.host, port=args.port, reload=args.reload, workers=1)
+
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", required=True, help="HF repo id or local folder (e.g., CohereLabs/aya-23-8B)")
-    ap.add_argument("--text", required=True, help="Japanese text")
+    sub = ap.add_subparsers(dest="cmd")
+
+    # one-shot (current behavior)
+    ap.add_argument("--model", help="HF repo id or local folder")
+    ap.add_argument("--text", help="Japanese text")
     ap.add_argument("--max_new", type=int, default=256)
     ap.add_argument("--temp", type=float, default=0.0)
     ap.add_argument("--load_4bit", action="store_true")
     ap.add_argument("--load_8bit", action="store_true")
+
+    # server mode
+    sv = sub.add_parser("serve")
+    sv.add_argument("--model", required=True)
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8787)
+    sv.add_argument("--load_4bit", action="store_true")
+    sv.add_argument("--load_8bit", action="store_true")
+    sv.add_argument("--reload", action="store_true")
+
     args = ap.parse_args()
+
+    if args.cmd == "serve":
+        return serve(args)
+
+    # default one-shot
     print(translate(args.model, args.text, args.max_new, args.temp, args.load_4bit, args.load_8bit))
+
 
 if __name__ == "__main__":
     main()

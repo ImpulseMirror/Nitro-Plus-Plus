@@ -17,6 +17,11 @@ huggingface-hub = "^0.25.0"
 fastapi = "^0.115.0"
 uvicorn = "^0.30.0"
 
+[tool.poetry.group.cuda.dependencies]
+# Match versions that pair with torch 2.8
+torch = { version = "2.8.*", source = "pytorch-cu128" }
+torchvision = { version = "0.20.*", source = "pytorch-cu128" }
+torchaudio  = { version = "2.8.*", source = "pytorch-cu128" }
 
 # torch is version/OS/CUDA specific → install separately after `poetry install`
 bitsandbytes = { version = "^0.43.0", markers = "platform_system == 'Linux' and platform_machine == 'x86_64'", optional = true }
@@ -26,6 +31,11 @@ gpu4bit = ["bitsandbytes"]
 
 [tool.poetry.scripts]
 nitropp = "nitro_plus_plus.cli:main"
+
+[[tool.poetry.source]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+priority = "explicit"
 
 [build-system]
 requires = ["poetry-core>=1.9.0"]
