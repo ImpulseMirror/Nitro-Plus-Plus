@@ -4,6 +4,9 @@ from transformers import (AutoTokenizer, AutoConfig,
                           AutoModelForSeq2SeqLM, AutoModelForCausalLM)
 from huggingface_hub import snapshot_download
 from transformers import StoppingCriteria, StoppingCriteriaList
+from typing import List, Optional
+import datetime
+
 
 # Resolve project root: <repo>/src/nitro_plus_plus/cli.py -> root is 3 up
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -236,6 +239,13 @@ def serve(args):
         max_new: int = 256
         temp: float = 0.0
 
+        # ---- BATCH TRANSLATE ----
+    class BatchReq(BaseModel):
+        texts: List[str]
+        max_new: int = 256
+        temp: float = 0.0
+        outfile: Optional[str] = None  # e.g. "outputs/run.jsonl"; default auto-named
+
     @app.get("/health")
     def health():
         return {"status": "ok"}
@@ -244,6 +254,34 @@ def serve(args):
     def translate_endpoint(r: Req):
         # Return a dict (FastAPI will serialize)
         return json.loads(translate_with_loaded(tok, model, kind, r.text, r.max_new, r.temp))
+
+    @app.post("/batch_translate")
+    def batch_translate(r: BatchReq):
+        # Resolve output file path
+        if r.outfile:
+            out_path = Path(r.outfile)
+            if not out_path.is_absolute():
+                out_path = PROJECT_ROOT / out_path
+        else:
+            stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_path = PROJECT_ROOT / f"outputs/batch_{stamp}.jsonl"
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        results = []
+        with out_path.open("w", encoding="utf-8") as fh:
+            for i, text in enumerate(r.texts, 1):
+                res = json.loads(translate_with_loaded(tok, model, kind, text, r.max_new, r.temp))
+                rec = {"index": i, **res}
+                results.append(rec)
+                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+        return {
+            "count": len(results),
+            "outfile": str(out_path),
+            "results": results  # keep if you want the responses inline; remove to only return path
+        }
+
 
     uvicorn.run(app, host=args.host, port=args.port, reload=args.reload, workers=1)
 
