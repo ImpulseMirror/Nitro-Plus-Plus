@@ -68,11 +68,6 @@ def load_model(repo_or_path, load_4bit=False, load_8bit=False):
     if tok.pad_token_id is None and tok.eos_token_id is not None:
         tok.pad_token_id = tok.eos_token_id
 
-    # cap absurd model_max_length...
-    max_ctx = getattr(tok, "model_max_length", None)
-    if not isinstance(max_ctx, int) or max_ctx > 100_000:
-        tok.model_max_length = 8192
-
 
     # cap absurd model_max_length values to avoid Rust tokenizer overflow on Windows
     max_ctx = getattr(tok, "model_max_length", None)
@@ -154,34 +149,46 @@ def translate(repo_or_path, text, max_new=256, temp=0.0, load_4bit=False, load_8
     new_tokens = out[0][prompt_len:]
     decoded = tok.decode(new_tokens, skip_special_tokens=True)
 
-    return extract_json_balanced(decoded, {"source": text, "translation": decoded.strip(), "notes": ""})
+    raw = extract_json_balanced(decoded, {"source": text, "translation": decoded.strip(), "notes": ""})
+    return _denest_and_normalize(raw, text)
+
 
 
 def build_inputs(tok, jp_text: str):
     sys = (
-        "You are a professional JP→EN visual-novel/news translator. "
-        'Output ONLY valid JSON with keys exactly: {"source","translation","notes"}. '
-        "Rules for proper nouns (people, places, organizations, regions, stations, universities): "
-        "use the standard English name if it exists; otherwise use Hepburn-style romaji. "
-        "Do NOT translate morphemes literally. "
-        "Examples: 東海 → Toukai (region), 東海地方 → Toukai region, 東海大学 → Tokai University. "
-        "If ambiguous, prefer romaji rather than literal meanings like 'East Sea'. "
-        "Keep the translation concise; put brief explanations in 'notes' only."
+        "You are a professional JP→EN translator.\n"
+        "Return EXACTLY ONE compact JSON object with keys in this order: "
+        '{"source","translation","notes"}.\n'
+        "Hard rules:\n"
+        "1) Output ONLY the JSON object (no code fences, no prose).\n"
+        "2) Do NOT wrap the JSON in quotes or stringify it.\n"
+        "3) Each field value must be plain text. The value of \"translation\" "
+        "   MUST NOT contain '{' or '}' and MUST NOT contain another JSON object/stringified JSON.\n"
+        "4) Use standard English names for well-known proper nouns; otherwise Hepburn romaji. "
+        "   Prefer romaji over literal morpheme translations (e.g., 東海→Toukai; 東海地方→Toukai region).\n"
+        "5) Keep the translation concise; put brief clarifications in \"notes\" only."
     )
 
-    # Few-shot: anchor 東海 usage in a weather context
-    ex_src = "東海では局地的に非常に激しい雨が降っています。"
-    ex_out = {
-        "source": ex_src,
+    # Positive few-shots (anchor style + the 東海 case)
+    ex1_src = "日本語のテキスト"
+    ex1_out = {"source": ex1_src, "translation": "Japanese Text", "notes": ""}
+
+    ex2_src = "東海では局地的に非常に激しい雨が降っています。"
+    ex2_out = {
+        "source": ex2_src,
         "translation": "In the Toukai region, localized torrential rain is falling.",
-        "notes": "「東海」 here refers to Japan’s Toukai region (Aichi, Shizuoka, Mie, Gifu), not 'East Sea'."
+        "notes": "「東海」 = Japan’s Toukai region (Aichi, Shizuoka, Mie, Gifu), not 'East Sea'."
     }
-    ex_json = json.dumps(ex_out, ensure_ascii=False)
+
+    ex1_json = json.dumps(ex1_out, ensure_ascii=False)
+    ex2_json = json.dumps(ex2_out, ensure_ascii=False)
 
     messages = [
         {"role": "system", "content": sys},
-        {"role": "user", "content": ex_src},
-        {"role": "assistant", "content": ex_json},
+        {"role": "user", "content": ex1_src},
+        {"role": "assistant", "content": ex1_json},
+        {"role": "user", "content": ex2_src},
+        {"role": "assistant", "content": ex2_json},
         {"role": "user", "content": jp_text.strip()},
     ]
 
@@ -192,11 +199,71 @@ def build_inputs(tok, jp_text: str):
     else:
         prompt = (
             f"<system>{sys}</system>\n"
-            f"<user>{ex_src}</user>\n"
-            f"<assistant>{ex_json}</assistant>\n"
+            f"<user>{ex1_src}</user>\n<assistant>{ex1_json}</assistant>\n"
+            f"<user>{ex2_src}</user>\n<assistant>{ex2_json}</assistant>\n"
             f"<user>{jp_text.strip()}</user>\n<assistant>"
         )
         return tok(prompt, return_tensors="pt", truncation=True, max_length=ctx)
+
+
+def _denest_and_normalize(raw_json: str, source_text: str) -> str:
+    """
+    If 'translation' contains stringified (or truncated) JSON, unwrap it and merge notes.
+    Always return a flat {"source","translation","notes"} JSON string.
+    """
+    try:
+        obj = json.loads(raw_json)
+    except Exception:
+        # Not even top-level JSON: return as-is
+        return raw_json
+
+    t = obj.get("translation", "")
+    if isinstance(t, str):
+        ts = t.strip()
+        # Looks like the model stuffed JSON into the string
+        if ts.startswith("{") and ("\"translation\"" in ts or "\"source\"" in ts):
+            # 1) Try parsing the inner JSON normally
+            try:
+                inner = json.loads(ts)
+                if isinstance(inner, dict):
+                    if "translation" in inner:
+                        obj["translation"] = inner.get("translation", "")
+                    if not obj.get("notes") and inner.get("notes"):
+                        obj["notes"] = inner["notes"]
+            except Exception:
+                # 2) Inner JSON is malformed/truncated -> regex fallback
+                s = ts
+                # Grab inner "translation": "..." (non-greedy), stopping at next field
+                m = re.search(r'"translation"\s*:\s*"(.*?)"\s*,\s*"(?:notes|source)"', s, flags=re.S)
+                if not m:
+                    # Fall back to first closing , or } after the string
+                    m = re.search(r'"translation"\s*:\s*"(.*?)"\s*[,}]', s, flags=re.S)
+                if m:
+                    raw_val = m.group(1)
+                    try:
+                        obj["translation"] = json.loads(f'"{raw_val}"')  # unescape
+                    except Exception:
+                        obj["translation"] = raw_val.replace('\\"', '"')
+
+                # Try to grab inner notes if top-level notes is empty
+                if not obj.get("notes"):
+                    m2 = re.search(r'"notes"\s*:\s*"(.*?)"\s*[,}]', s, flags=re.S)
+                    if m2:
+                        raw_notes = m2.group(1)
+                        try:
+                            obj["notes"] = json.loads(f'"{raw_notes}"')
+                        except Exception:
+                            obj["notes"] = raw_notes.replace('\\"', '"')
+
+    # Normalize + enforce fields
+    out = {
+        "source": source_text,
+        "translation": str(obj.get("translation", "")).strip(),
+        "notes": str(obj.get("notes", "")).strip(),
+    }
+    return json.dumps(out, ensure_ascii=False)
+
+
 
 
 def translate_with_loaded(tok, model, kind, text, max_new=256, temp=0.0):
@@ -220,7 +287,9 @@ def translate_with_loaded(tok, model, kind, text, max_new=256, temp=0.0):
     )
     new_tokens = out[0][prompt_len:]
     decoded = tok.decode(new_tokens, skip_special_tokens=True)
-    return extract_json_balanced(decoded, {"source": text, "translation": decoded.strip(), "notes": ""})
+    raw = extract_json_balanced(decoded, {"source": text, "translation": decoded.strip(), "notes": ""})
+    return _denest_and_normalize(raw, text)
+
 
 
 def kill_port(port: int) -> int:
@@ -293,23 +362,31 @@ def serve(args):
                 out_path = PROJECT_ROOT / out_path
         else:
             stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_path = PROJECT_ROOT / f"outputs/batch_{stamp}.jsonl"
+            out_path = PROJECT_ROOT / f"outputs/batch_{stamp}.json"  # default to JSON array
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         results = []
-        with out_path.open("w", encoding="utf-8") as fh:
-            for i, text in enumerate(r.texts, 1):
-                res = json.loads(translate_with_loaded(tok, model, kind, text, r.max_new, r.temp))
-                rec = {"index": i, **res}
-                results.append(rec)
-                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        for i, text in enumerate(r.texts, 1):
+            res = json.loads(translate_with_loaded(tok, model, kind, text, r.max_new, r.temp))
+            results.append({"index": i, **res})
+
+        # Write depending on extension: .json => array, .jsonl => NDJSON
+        if out_path.suffix.lower() == ".jsonl":
+            with out_path.open("w", encoding="utf-8") as fh:
+                for rec in results:
+                    fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        else:
+            with out_path.open("w", encoding="utf-8") as fh:
+                fh.write(json.dumps(results, ensure_ascii=False, indent=2))
+                fh.write("\n")
 
         return {
             "count": len(results),
             "outfile": str(out_path),
-            "results": results  # keep if you want the responses inline; remove to only return path
+            "results": results  # keep or drop as you prefer
         }
+
 
 
     uvicorn.run(app, host=args.host, port=args.port, reload=args.reload, workers=1)
