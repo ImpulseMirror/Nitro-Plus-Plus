@@ -6,6 +6,7 @@ from huggingface_hub import snapshot_download
 from transformers import StoppingCriteria, StoppingCriteriaList
 from typing import List, Optional
 import datetime
+import sys, subprocess
 
 
 # Resolve project root: <repo>/src/nitro_plus_plus/cli.py -> root is 3 up
@@ -220,6 +221,34 @@ def translate_with_loaded(tok, model, kind, text, max_new=256, temp=0.0):
     new_tokens = out[0][prompt_len:]
     decoded = tok.decode(new_tokens, skip_special_tokens=True)
     return extract_json_balanced(decoded, {"source": text, "translation": decoded.strip(), "notes": ""})
+
+
+def kill_port(port: int) -> int:
+    # Windows PowerShell approach
+    try:
+        cmd = [
+            "powershell", "-NoProfile", "-Command",
+            f"(Get-NetTCPConnection -State Listen -LocalPort {port} -ErrorAction SilentlyContinue | "
+            f"Select-Object -Expand OwningProcess -Unique) -join ' '"
+        ]
+        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL).strip()
+        if not out:
+            print(f"No listener on port {port}.")
+            return 0
+        for pid in [p for p in out.split() if p.isdigit()]:
+            subprocess.run(["taskkill", "/PID", pid, "/F"], check=False)
+            print(f"Killed PID {pid} on port {port}.")
+        return 0
+    except Exception as e:
+        print(f"Failed to kill port {port}: {e}", file=sys.stderr)
+        return 1
+
+def kill_port_main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("port", type=int)
+    args = ap.parse_args()
+    sys.exit(kill_port(args.port))
+
 
 
 def serve(args):
