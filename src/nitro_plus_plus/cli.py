@@ -505,6 +505,43 @@ def nipa_extract(archive_path: str, game_id: str | None = None, cwd: str | None 
     return str(desired)
 
 
+def collect_nss_strings(start: str | Path,
+                        recursive: bool = False,
+                        encoding: str = "shift_jis",
+                        errors: str = "replace") -> List[str]:
+    """
+    Read all .nss files under `start` (non-recursive by default),
+    decode as Shift-JIS, and return a JSON-ready list of strings.
+    """
+    root = Path(start)
+    if not root.is_dir():
+        raise NotADirectoryError(f"Not a directory: {root}")
+
+    pattern = "**/*.nss" if recursive else "*.nss"
+    texts: List[str] = []
+
+    for fp in sorted(root.glob(pattern)):
+        with fp.open("r", encoding=encoding, errors=errors) as f:
+            texts.append(f.read())
+
+    return texts
+
+def nss_to_json_array(start: str | Path,
+                      out: str | Path | None = None,
+                      recursive: bool = False,
+                      encoding: str = "shift_jis",
+                      errors: str = "replace") -> str:
+    """
+    Build a JSON array (UTF-8) of Shift-JIS-decoded .nss file contents.
+    If `out` is provided, write it to disk; always return the JSON string.
+    """
+    arr = collect_nss_strings(start, recursive=recursive, encoding=encoding, errors=errors)
+    blob = json.dumps(arr, ensure_ascii=False, indent=2)
+    if out:
+        Path(out).write_text(blob, encoding="utf-8")
+    return blob
+
+
 def serve(args):
     from fastapi import FastAPI
     from pydantic import BaseModel
@@ -578,6 +615,22 @@ def serve(args):
 
 
 
+import argparse
+
+def _nss_to_json_array(start, recursive=False, encoding="shift_jis", errors="replace"):
+    from pathlib import Path
+    import json
+    root = Path(start)
+    if not root.is_dir():
+        raise NotADirectoryError(f"Not a directory: {root}")
+
+    pattern = "**/*.nss" if recursive else "*.nss"
+    texts = []
+    for fp in sorted(root.glob(pattern)):
+        with fp.open("r", encoding=encoding, errors=errors) as f:
+            texts.append(f.read())
+    return json.dumps(texts, ensure_ascii=False, indent=2)
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd")
@@ -604,14 +657,35 @@ def main():
     nx.add_argument("-g", "--game-id", default=None, help="Optional game ID")
     nx.add_argument("--cwd", default=None, help="Working dir (default=current)")
 
+    # NEW: build JSON array of Shift-JIS-decoded .nss files
+    nj = sub.add_parser("nssjson", help="Emit JSON array of .nss file contents (decoded as Shift-JIS)")
+    nj.add_argument("start", help="Directory containing .nss files")
+    nj.add_argument("--out", help="Write JSON to this file (UTF-8). If omitted, prints to stdout")
+    nj.add_argument("-r", "--recursive", action="store_true", help="Recurse into subdirectories")
+    nj.add_argument("--encoding", default="shift_jis", help="Source encoding (default: shift_jis)")
+    nj.add_argument("--errors", default="replace", choices=["strict", "ignore", "replace"],
+                    help="Decoding error handling (default: replace)")
+
     args = ap.parse_args()
 
     if args.cmd == "serve":
         return serve(args)
-    
+
     elif args.cmd == "nipa":
         out = nipa_extract(args.archive, args.game_id, args.cwd)
         print(out); return
+
+    elif args.cmd == "nssjson":
+        from pathlib import Path
+        blob = _nss_to_json_array(args.start,
+                                  recursive=args.recursive,
+                                  encoding=args.encoding,
+                                  errors=args.errors)
+        if args.out:
+            Path(args.out).write_text(blob, encoding="utf-8")
+        else:
+            print(blob)
+        return
 
     # default one-shot
     print(translate(args.model, args.text, args.max_new, args.temp, args.load_4bit, args.load_8bit))
