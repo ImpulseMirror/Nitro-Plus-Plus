@@ -615,9 +615,7 @@ def serve(args):
 
 
 
-import argparse
-
-def _nss_to_json_array(start, recursive=False, encoding="shift_jis", errors="replace"):
+def _nss_to_json_map(start, recursive=False, encoding="shift_jis", errors="replace"):
     from pathlib import Path
     import json
     root = Path(start)
@@ -625,11 +623,12 @@ def _nss_to_json_array(start, recursive=False, encoding="shift_jis", errors="rep
         raise NotADirectoryError(f"Not a directory: {root}")
 
     pattern = "**/*.nss" if recursive else "*.nss"
-    texts = []
+    out = {}
     for fp in sorted(root.glob(pattern)):
         with fp.open("r", encoding=encoding, errors=errors) as f:
-            texts.append(f.read())
-    return json.dumps(texts, ensure_ascii=False, indent=2)
+            out[fp.name] = {"original": f.read()}
+    return json.dumps(out, ensure_ascii=False, indent=2)
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -657,8 +656,7 @@ def main():
     nx.add_argument("-g", "--game-id", default=None, help="Optional game ID")
     nx.add_argument("--cwd", default=None, help="Working dir (default=current)")
 
-    # NEW: build JSON array of Shift-JIS-decoded .nss files
-    nj = sub.add_parser("nssjson", help="Emit JSON array of .nss file contents (decoded as Shift-JIS)")
+    nj = sub.add_parser("nssjson", help="Emit JSON map of .nss contents decoded as Shift-JIS")
     nj.add_argument("start", help="Directory containing .nss files")
     nj.add_argument("--out", help="Write JSON to this file (UTF-8). If omitted, prints to stdout")
     nj.add_argument("-r", "--recursive", action="store_true", help="Recurse into subdirectories")
@@ -670,26 +668,22 @@ def main():
 
     if args.cmd == "serve":
         return serve(args)
-
     elif args.cmd == "nipa":
         out = nipa_extract(args.archive, args.game_id, args.cwd)
         print(out); return
-
     elif args.cmd == "nssjson":
         from pathlib import Path
-        blob = _nss_to_json_array(args.start,
-                                  recursive=args.recursive,
-                                  encoding=args.encoding,
-                                  errors=args.errors)
+        blob = _nss_to_json_map(args.start,
+                                recursive=args.recursive,
+                                encoding=args.encoding,
+                                errors=args.errors)
         if args.out:
             Path(args.out).write_text(blob, encoding="utf-8")
         else:
             print(blob)
         return
 
-    # default one-shot
     print(translate(args.model, args.text, args.max_new, args.temp, args.load_4bit, args.load_8bit))
-
 
 if __name__ == "__main__":
     main()
