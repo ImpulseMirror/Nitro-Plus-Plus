@@ -10,11 +10,11 @@ poetry install -with cuda
 ```
 ### Start request server
 ```
-poetry run nitropp serve --model org/repo
+poetry run nitropp serve --model CohereLabs/aya-23-8B
 ```
 Notes:
 - The server import is lazy. `fastapi`/`uvicorn` are only required when using `serve`.
-- One-shot translate still works without FastAPI: `poetry run nitropp --model org/repo --text '日本語テキスト'`.
+- One-shot translate still works without FastAPI: `poetry run nitropp --model CohereLabs/aya-23-8B --text '日本語テキスト'`.
 ### Kill server 
 
 ```
@@ -29,6 +29,22 @@ poetry run killport 8787 # kills the process on port 8787
 - `nitro_plus_plus.nipa`: helpers to locate/build and run `nipa.exe` and extract archives.
 - `nitro_plus_plus.nss`: utilities to read `.nss` files and emit JSON.
 - `nitro_plus_plus.utils`: miscellaneous utilities (e.g., `killport`).
+
+## CLI Commands
+
+- One-shot translate:
+  - `poetry run nitropp --model CohereLabs/aya-23-8B --text '日本語テキスト'`
+- Start server (REST API):
+  - `poetry run nitropp serve --model CohereLabs/aya-23-8B`
+- Extract NPA with nipa:
+  - `poetry run nitropp nipa path/to/nss.npa [-g GameID] [--cwd DIR]`
+- Export `.nss` files to JSON map:
+  - Preferred (via Poetry script):
+    - `poetry run nitropp nssjson input/nss --out outputs/nss_texts.json`
+  - Or module form:
+    - `poetry run python -m nitro_plus_plus.cli nssjson input/nss --out outputs/nss_texts.json`
+
+Note: Running `python src/nitro_plus_plus/cli.py ...` directly isn’t supported because relative imports require package/module execution. Use one of the commands above.
 
 # Translation Endpoints
 
