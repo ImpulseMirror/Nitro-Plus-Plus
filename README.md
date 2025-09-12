@@ -46,6 +46,14 @@ poetry run killport 8787 # kills the process on port 8787
 
 Note: Running `python src/nitro_plus_plus/cli.py ...` directly isn’t supported because relative imports require package/module execution. Use one of the commands above.
 
+### NIPA auto-clone/build
+- First use of `poetry run nitropp nipa ...` will clone `external/nipa`.
+- The tool will try to build `nipa.exe` using MSBuild if it isn’t already present.
+  - It searches for MSBuild via PATH, `vswhere`, and common VS 2019/2022 paths.
+  - If the legacy VS2010 toolset (`v100`) is missing, it auto-retargets the project to a modern toolset (`v143`/`v142`) and retries.
+  - You can override the MSBuild binary via env var `NIPA_MSBUILD`.
+- Requirements: Visual Studio Build Tools (MSBuild) installed. If build fails, install VS Build Tools and retry.
+
 # Translation Endpoints
 
 ## Example Request

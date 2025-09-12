@@ -24,42 +24,70 @@ def _ensure_nipa_repo() -> Path:
     return sub
 
 
+def _vswhere() -> str | None:
+    """Return MSBuild.exe path discovered via vswhere, or None if unavailable."""
+    vswhere = r"C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe"
+    if not Path(vswhere).is_file():
+        return None
+    try:
+        msbuild = subprocess.check_output(
+            [vswhere, "-latest", "-requires", "Microsoft.Component.MSBuild",
+             "-find", r"MSBuild\\**\\Bin\\MSBuild.exe"],
+            text=True
+        ).strip()
+        return msbuild or None
+    except Exception:
+        return None
+
+
 def _ensure_nipa_built() -> str:
-    """Return a path to `nipa.exe`, attempting to build if not found."""
-    # Prefer prebuilt binary if present under bin/
-    pre = PROJECT_ROOT / "bin" / "nipa.exe"
-    if pre.is_file():
-        return str(pre)
+    """
+    Ensure we have bin/nipa.exe:
+      1) if PROJECT_ROOT/bin/nipa.exe exists -> use it
+      2) else clone/update repo, then build external/nipa/vc10 with modern toolset
+         (force PlatformToolset=v143/v142, Platform=Win32), copy result to bin/.
+    Returns absolute path to the exe.
+    """
+    out_exe = PROJECT_ROOT / "bin" / "nipa.exe"
+    if out_exe.is_file():
+        return str(out_exe)
 
     sub = _ensure_nipa_repo()  # clone if missing, pull if present
+    msbuild = _vswhere()
+    if not msbuild:
+        raise RuntimeError("MSBuild not found. Install Visual Studio Build Tools (C++ workload).")
 
-    # If a build already exists under external/nipa/vc10/nipa/Release/nipa.exe, use it.
-    cand = sub / "vc10" / "nipa" / "Release" / "nipa.exe"
-    if cand.is_file():
-        return str(cand)
+    # Find a solution/project under vc10/
+    vc10 = sub / "vc10"
+    candidates = [vc10 / "nipa.sln", vc10 / "nipa.vcxproj"] + \
+                 list(vc10.glob("*.sln")) + list(vc10.glob("*.vcxproj"))
+    if not candidates:
+        raise FileNotFoundError("No Visual Studio solution/project under external/nipa/vc10/")
+    sln = next(p for p in candidates if p.exists())
 
-    # Attempt to build via MSBuild if available
-    sln = sub / "vc10" / "nipa.sln"
-    if sln.is_file():
-        # Try common MSBuild locations
-        msbuild_cmds = [
-            ["msbuild", str(sln), "/p:Configuration=Release"],
-            ["C:/Program Files/Microsoft Visual Studio/2022/BuildTools/MSBuild/Current/Bin/MSBuild.exe", str(sln), "/p:Configuration=Release"],
+    # Build Release|Win32 and force a modern toolset; v143 (VS2022) then v142 (VS2019)
+    # Some older solutions don’t have x64 configs; stick to Win32.
+    for toolset in ("v143", "v142"):
+        args = [
+            msbuild, str(sln), "/m",
+            "/p:Configuration=Release",
+            "/p:Platform=Win32",
+            f"/p:PlatformToolset={toolset}",
         ]
-        for cmd in msbuild_cmds:
-            try:
-                r = subprocess.run(cmd, cwd=str(sln.parent), check=False)
-                if r.returncode == 0 and cand.is_file():
-                    return str(cand)
-            except Exception:
-                pass
+        print("MSBuild:", " ".join(args))
+        proc = subprocess.run(args, cwd=str(sln.parent), text=True)
+        # Look for produced exe anywhere in the repo (Release folders, etc.)
+        hits = glob.glob(str(sub / "**" / "nipa.exe"), recursive=True)
+        if proc.returncode == 0 and hits:
+            exe = Path(hits[0])
+            out_exe.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(exe, out_exe)
+            return str(out_exe)
 
-    # Last resort: search for any nipa.exe built under the repo
-    hits = glob.glob(str(sub / "**/nipa.exe"), recursive=True)
-    if hits:
-        return hits[0]
-
-    raise RuntimeError("nipa.exe not found and build failed. Please install/build it manually.")
+    raise RuntimeError(
+        "Could not build nipa with modern toolset. "
+        "You can either install the VS2010 (v100) toolset OR set NIPA_EXE to a prebuilt binary."
+    )
 
 
 def _find_nipa_exe() -> str:
