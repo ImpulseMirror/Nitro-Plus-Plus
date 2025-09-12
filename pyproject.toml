@@ -29,7 +29,7 @@ gpu4bit = ["bitsandbytes"]
 
 [tool.poetry.scripts]
 nitropp = "nitro_plus_plus.cli:main"
-killport = "nitro_plus_plus.cli:kill_port_main"
+killport = "nitro_plus_plus.utils:kill_port_main"
 
 
 [[tool.poetry.source]]

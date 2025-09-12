@@ -12,11 +12,23 @@ poetry install -with cuda
 ```
 poetry run nitropp serve --model org/repo
 ```
+Notes:
+- The server import is lazy. `fastapi`/`uvicorn` are only required when using `serve`.
+- One-shot translate still works without FastAPI: `poetry run nitropp --model org/repo --text '日本語テキスト'`.
 ### Kill server 
 
 ```
 poetry run killport 8787 # kills the process on port 8787
 ```
+
+## Module Layout
+
+- `nitro_plus_plus.cli`: argument parsing and command dispatch only.
+- `nitro_plus_plus.translate`: model loading, prompt building, JSON-safe translation helpers.
+- `nitro_plus_plus.server`: FastAPI app and endpoints for translate and batch.
+- `nitro_plus_plus.nipa`: helpers to locate/build and run `nipa.exe` and extract archives.
+- `nitro_plus_plus.nss`: utilities to read `.nss` files and emit JSON.
+- `nitro_plus_plus.utils`: miscellaneous utilities (e.g., `killport`).
 
 # Translation Endpoints
 
